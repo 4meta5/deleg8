@@ -4,6 +4,7 @@ This pallet demonstrates a way to bound runtime recursion with module-level cons
 1. group size, number of members `Vec<AccountId>` associated on-chain with `TreeId` s.t. each tree can only have up to `Trait::MaxSize` members in total
 2. number of children, each tree can only have up to `Trait::MaxKids` number of children for delegation
 3. depth, a tree can only have height up to `Trait::MaxDepth` or it is not allowed to be created for delegation (and `depth_of_child = depth_of_parent + 1`)
+
 Adding new members and delegating to subtrees is incentivized with the runtime design in mind. Bonds for adding new members scale linearly with group size. Bonds for adding new subtrees scales exponentially with number of children and depth.
 
 ## Rules
