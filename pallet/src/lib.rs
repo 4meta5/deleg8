@@ -395,14 +395,17 @@ impl<T: Trait> Module<T> {
             mem.dedup();
             mem.into_iter().for_each(|m| {
                 if let Some(bond) = <Members<T>>::get(tree.id, &m) {
-                    T::Currency::unreserve(&m, bond);
-                    if penalty {
-                        // (could) transfer the bond to some (treasury) account
-                        // instead of returning the bond
-                        todo!();
+                    // constraint: cannot remove the account who created the hierarchy
+                    if tree.bonded != m {
+                        T::Currency::unreserve(&m, bond);
+                        if penalty {
+                            // (could) transfer the bond to some (treasury) account
+                            // instead of returning the bond
+                            todo!();
+                        }
+                        <Members<T>>::remove(tree.id, m);
+                        size_decrease += 1u32;
                     }
-                    <Members<T>>::remove(tree.id, m);
-                    size_decrease += 1u32;
                 }
             });
             // insert actual size decrease
