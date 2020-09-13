@@ -82,10 +82,10 @@ impl pallet_balances::Trait for TestRuntime {
     type WeightInfo = ();
 }
 parameter_types! {
-    pub const Bond: u64 = 10;
+    pub const Bond: u64 = 2;
     pub const MaxSize: u32 = 5;
-    pub const MaxDepth: u32 = 5;
-    pub const MaxKids: u32 = 2;
+    pub const MaxDepth: u32 = 3;
+    pub const MaxKids: u32 = 3;
 }
 impl Trait for TestRuntime {
     type Event = TestEvent;
@@ -156,28 +156,27 @@ fn create_root_works() {
         );
         assert_eq!(Balances::free_balance(&1), 1000);
         assert_ok!(Delegate::create_root(Origin::signed(1)));
-        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 10), get_last_event());
-        assert_eq!(Balances::free_balance(&1), 990);
+        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 2), get_last_event());
+        assert_eq!(Balances::free_balance(&1), 998);
         for i in 2u64..7u64 {
             assert_eq!(Balances::free_balance(&i), 100);
             assert_ok!(Delegate::create_root(Origin::signed(i)));
             assert_eq!(
-                RawEvent::RegisterIdRoot(i - 1u64, i, 10),
+                RawEvent::RegisterIdRoot(i - 1u64, i, 2),
                 get_last_event()
             );
-            assert_eq!(Balances::free_balance(&i), 90);
+            assert_eq!(Balances::free_balance(&i), 98);
         }
     });
 }
 
 #[test]
-fn revoke_works() {
+fn base_case_revoke_works() {
     new_test_ext().execute_with(|| {
-        // test root revocation first
         assert_eq!(Balances::free_balance(&1), 1000);
         assert_ok!(Delegate::create_root(Origin::signed(1)));
-        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 10), get_last_event());
-        assert_eq!(Balances::free_balance(&1), 990);
+        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 2), get_last_event());
+        assert_eq!(Balances::free_balance(&1), 998);
         assert_ok!(Delegate::revoke(Origin::signed(1), 0, false));
         assert_eq!(RawEvent::RevokeDelegation(0), get_last_event());
         assert_eq!(Balances::free_balance(&1), 1000);
@@ -185,35 +184,128 @@ fn revoke_works() {
             assert_eq!(Balances::free_balance(&i), 100);
             assert_ok!(Delegate::create_root(Origin::signed(i)));
             assert_eq!(
-                RawEvent::RegisterIdRoot(i - 1u64, i, 10),
+                RawEvent::RegisterIdRoot(i - 1u64, i, 2),
                 get_last_event()
             );
-            assert_eq!(Balances::free_balance(&i), 90);
+            assert_eq!(Balances::free_balance(&i), 98);
             assert_ok!(Delegate::revoke(Origin::signed(i), i - 1u64, false));
             assert_eq!(RawEvent::RevokeDelegation(i - 1), get_last_event());
             assert_eq!(Balances::free_balance(&i), 100);
         }
-        // test child revocation next and how it percolates
     });
 }
 
 #[test]
-fn add_members_works() {
+fn add_remove_members_works() {
     new_test_ext().execute_with(|| {
         assert_eq!(Balances::free_balance(&1), 1000);
         assert_ok!(Delegate::create_root(Origin::signed(1)));
-        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 10), get_last_event());
-        assert_eq!(Balances::free_balance(&1), 990);
-        // this group would be above 5
+        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 2), get_last_event());
+        assert_eq!(Balances::free_balance(&1), 998);
+        // this group would be above 5 (SIZE CONSTRAINT)
         assert_noop!(
             Delegate::add_members(Origin::signed(1), 0, vec![1, 2, 3, 4, 5, 6]),
             Error::<TestRuntime>::CannotAddGroupAboveMaxSize
         );
-        // this group works because it dedups 1
+        // 1 + 5 = 5 <= 5 Module Group Size Limit
         assert_ok!(Delegate::add_members(
             Origin::signed(1),
             0,
-            vec![1, 2, 3, 4, 5]
+            vec![2, 3, 4, 5]
         ));
+        // Linear collateral requirement for adding members
+        // 998 - 2 * (new_size) = 998 - 2 * 5 = 988
+        assert_eq!(Balances::free_balance(&1), 988);
+        assert_noop!(
+            Delegate::remove_members(
+                Origin::signed(2),
+                0,
+                vec![1, 3, 5],
+                false,
+            ),
+            Error::<TestRuntime>::NotAuthorized
+        );
+        assert_ok!(Delegate::remove_members(
+            Origin::signed(1),
+            0,
+            vec![2],
+            false,
+        ));
+    });
+}
+
+#[test]
+fn delegate_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Delegate::create_root(Origin::signed(1)));
+        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 2), get_last_event());
+        assert_eq!(Balances::free_balance(&1), 998);
+        assert_ok!(Delegate::delegate(Origin::signed(1), 0, vec![2, 3, 4]));
+        // 998 - bond ^ {height + kids} = 998 - 2 ^ {1 + 1}
+        assert_eq!(Balances::free_balance(&1), 994);
+        assert_eq!(RawEvent::DelegateBranch(0, 1, 1, 4), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(1), 0, vec![3, 4, 6]));
+        // 994 - bond ^ {height + kids} = 994 - 2 ^ {1 + 2}
+        assert_eq!(Balances::free_balance(&1), 986);
+        assert_eq!(RawEvent::DelegateBranch(0, 2, 1, 8), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(2), 1, vec![3, 5]));
+        // 100 - bond ^ {height + kids} = 100 - 2 ^ {2 + 1}
+        assert_eq!(Balances::free_balance(&2), 92);
+        assert_eq!(RawEvent::DelegateBranch(1, 3, 2, 8), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(3), 3, vec![1, 2]));
+        // 100 - bond ^ {height + kids} = 100 - 2 ^ {3 + 1}
+        assert_eq!(Balances::free_balance(&3), 84);
+        assert_eq!(RawEvent::DelegateBranch(3, 4, 3, 16), get_last_event());
+        // DEPTH CONSTRAINT
+        assert_noop!(
+            Delegate::delegate(Origin::signed(2), 4, vec![5, 6]),
+            Error::<TestRuntime>::CannotDelegateBelowMaxDepth
+        );
+        assert_ok!(Delegate::delegate(Origin::signed(1), 0, vec![5, 6]));
+        // 986 - bond ^ {height + kids} = 986 - 2 ^ {1 + 3}
+        assert_eq!(Balances::free_balance(&1), 970);
+        assert_eq!(RawEvent::DelegateBranch(0, 5, 1, 16), get_last_event());
+        // SPAN CONSTRAINT
+        assert_noop!(
+            Delegate::delegate(Origin::signed(1), 0, vec![2, 8]),
+            Error::<TestRuntime>::CannotDelegateAboveMaxKids
+        );
+    });
+}
+
+#[test]
+fn recursive_revoke_works() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Delegate::create_root(Origin::signed(1)));
+        assert_eq!(RawEvent::RegisterIdRoot(0, 1, 2), get_last_event());
+        assert_eq!(Balances::free_balance(&1), 998);
+        assert_ok!(Delegate::delegate(Origin::signed(1), 0, vec![2, 3, 4]));
+        // 998 - bond ^ {height + kids} = 998 - 2 ^ {1 + 1}
+        assert_eq!(Balances::free_balance(&1), 994);
+        assert_eq!(RawEvent::DelegateBranch(0, 1, 1, 4), get_last_event());
+        // 994 - bond ^ {height + kids} = 998 - 2 ^ {1 + 1}
+        assert_eq!(Balances::free_balance(&1), 994);
+        assert_eq!(RawEvent::DelegateBranch(0, 1, 1, 4), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(1), 0, vec![3, 4, 6]));
+        // 994 - bond ^ {height + kids} = 994 - 2 ^ {1 + 2}
+        assert_eq!(Balances::free_balance(&1), 986);
+        assert_eq!(RawEvent::DelegateBranch(0, 2, 1, 8), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(2), 1, vec![3, 5]));
+        // 100 - bond ^ {height + kids} = 100 - 2 ^ {2 + 1}
+        assert_eq!(Balances::free_balance(&2), 92);
+        assert_eq!(RawEvent::DelegateBranch(1, 3, 2, 8), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(3), 3, vec![1, 2]));
+        // 100 - bond ^ {height + kids} = 100 - 2 ^ {3 + 1}
+        assert_eq!(Balances::free_balance(&3), 84);
+        assert_eq!(RawEvent::DelegateBranch(3, 4, 3, 16), get_last_event());
+        assert_ok!(Delegate::delegate(Origin::signed(5), 3, vec![1, 2]));
+        // 100 - bond ^ {height + kids} = 100 - 2 ^ {3 + 2}
+        assert_eq!(Balances::free_balance(&5), 68);
+        assert_eq!(RawEvent::DelegateBranch(3, 5, 5, 32), get_last_event());
+        assert_ok!(Delegate::revoke(Origin::signed(1), 0, false));
+        assert_eq!(Balances::free_balance(&5), 100);
+        assert_eq!(Balances::free_balance(&3), 100);
+        assert_eq!(Balances::free_balance(&1), 1000);
+        assert_eq!(Balances::free_balance(&2), 100);
     });
 }

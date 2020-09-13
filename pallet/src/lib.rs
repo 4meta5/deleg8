@@ -38,7 +38,7 @@
 //! number of subgroups (`kids`), and number of members (`size`). Each
 //! `TreeState<_, _>` is either a root or the child of a parent tree.
 //! We define an algorithm for tree creation.
-//! ```
+//! ```ignore
 //! TreeCreation(parent: TreeState<_, _>)
 //!     let kid = TreeState {
 //!         parent: Some(parent.id)
@@ -217,7 +217,7 @@ decl_module! {
             T::Currency::reserve(&caller, bond)?;
             let id = Self::gen_uid();
             let state = TreeState {
-                id: id,
+                id,
                 parent: None,
                 bonded: caller.clone(),
                 height: 0u32,
@@ -237,7 +237,7 @@ decl_module! {
         ) -> DispatchResult {
             let caller = ensure_signed(origin)?;
             ensure!(<Members<T>>::get(parent, &caller).is_some(), Error::<T>::NotAuthorized);
-            let mut parent_st = <Trees<T>>::get(parent).ok_or(Error::<T>::TreeDNE)?;
+            let parent_st = <Trees<T>>::get(parent).ok_or(Error::<T>::TreeDNE)?;
             let (new_kids, new_height) = (parent_st.kids + 1u32, parent_st.height + 1u32);
             // check that delegating does not violate module kids constraints (num of children)
             ensure!(new_kids <= T::MaxKids::get(), Error::<T>::CannotDelegateAboveMaxKids);
@@ -253,9 +253,8 @@ decl_module! {
                 kids: 0u32,
                 size: 0u32,
             };
-            parent_st.kids += 1u32;
             Self::add_mems(state, members);
-            <Trees<T>>::insert(parent, parent_st);
+            <Trees<T>>::insert(parent, TreeState {kids: new_kids, ..parent_st});
             Self::deposit_event(RawEvent::DelegateBranch(parent, id, caller, bond));
             Ok(())
         }
@@ -296,7 +295,6 @@ decl_module! {
         #[weight = 0]
         fn remove_members(
             origin,
-            parent: Option<T::TreeId>,
             tree_id: T::TreeId,
             members: Vec<T::AccountId>,
             penalty: bool,
@@ -315,22 +313,8 @@ decl_module! {
     }
 }
 
-// Helpers with no storage side effects
-impl<T: Trait> Module<T> {
-    /// Manual power function n ^ height
-    /// -> no punishment for calling this and not having enough balance is an attack vector
-    /// --> could match on reservation error and deduct a fee but would violate noop
-    pub fn power(n: BalanceOf<T>, height: u32) -> BalanceOf<T> {
-        let mut ps = n;
-        for _ in 0..height {
-            ps *= n;
-        }
-        ps
-    }
-}
-
 // Infallible Storage Mutators
-// -> must check permissions in caller code before calls
+// -> check permissions in caller code before calls
 impl<T: Trait> Module<T> {
     /// Generate Unique TreeId
     pub fn gen_uid() -> T::TreeId {
@@ -349,13 +333,12 @@ impl<T: Trait> Module<T> {
     ) -> Result<BalanceOf<T>, DispatchError> {
         let bond: BalanceOf<T> = T::Bond::get() * new_size.into();
         T::Currency::reserve(account, bond)?;
-        <Members<T>>::mutate(tree, account, |b| {
-            if let Some(a) = b {
-                *a + bond
-            } else {
-                bond
-            }
-        });
+        let b = if let Some(total) = <Members<T>>::get(tree, account) {
+            total + bond
+        } else {
+            bond
+        };
+        <Members<T>>::insert(tree, account, b);
         Ok(bond)
     }
     /// Exponential Bond
@@ -367,15 +350,23 @@ impl<T: Trait> Module<T> {
         height: u32,
         kids: u32,
     ) -> Result<BalanceOf<T>, DispatchError> {
-        let bond: BalanceOf<T> = Self::power(T::Bond::get(), height + kids);
+        let exp = (height + kids) as usize;
+        // Exponential closure n ^ exp
+        // - no punishment for calling this and not having enough balance is an attack vector
+        // -- could match on reservation error and deduct a fee but would cause storage noop
+        let power = |n: BalanceOf<T>, exp: usize| {
+            vec![n; exp]
+                .iter()
+                .fold(BalanceOf::<T>::zero() + 1u32.into(), |a, b| a * *b)
+        };
+        let bond: BalanceOf<T> = power(T::Bond::get(), exp);
         T::Currency::reserve(account, bond)?;
-        <Members<T>>::mutate(tree, account, |b| {
-            if let Some(a) = b {
-                *a + bond
-            } else {
-                bond
-            }
-        });
+        let b = if let Some(total) = <Members<T>>::get(tree, account) {
+            total + bond
+        } else {
+            bond
+        };
+        <Members<T>>::insert(tree, account, b);
         Ok(bond)
     }
     /// Add Members to Tree
@@ -384,7 +375,7 @@ impl<T: Trait> Module<T> {
         let mut size_increase = 0u32;
         mems.into_iter().for_each(|m| {
             // only insert if profile does not already exist
-            if let None = <Members<T>>::get(tree.id, &m) {
+            if <Members<T>>::get(tree.id, &m).is_none() {
                 <Members<T>>::insert(tree.id, m, BalanceOf::<T>::zero());
                 size_increase += 1u32;
             }
@@ -400,23 +391,49 @@ impl<T: Trait> Module<T> {
         penalty: bool,
     ) {
         let mut size_decrease = 0u32;
-        let mut remove_if_exists = |id: T::TreeId, m: &T::AccountId| {
-            if let Some(bond) = <Members<T>>::get(id, m) {
-                T::Currency::unreserve(&m, bond);
+        if let Some(mut mem) = mems {
+            mem.dedup();
+            mem.into_iter().for_each(|m| {
+                if let Some(bond) = <Members<T>>::get(tree.id, &m) {
+                    T::Currency::unreserve(&m, bond);
+                    if penalty {
+                        // (could) transfer the bond to some (treasury) account
+                        // instead of returning the bond
+                        todo!();
+                    }
+                    <Members<T>>::remove(tree.id, m);
+                    size_decrease += 1u32;
+                }
+            });
+            // insert actual size decrease
+            tree.size -= size_decrease;
+            <Trees<T>>::insert(tree.id, tree);
+        } else {
+            <Members<T>>::iter_prefix(tree.id).for_each(|(a, b)| {
+                T::Currency::unreserve(&a, b);
                 if penalty {
                     // (could) transfer the bond to some (treasury) account
                     // instead of returning the bond
                     todo!();
                 }
-                <Members<T>>::remove(id, m);
+                <Members<T>>::remove(tree.id, a);
                 size_decrease += 1u32;
+            });
+            // removing tree creates bug in unique TreeId generation
+            // <Trees<T>>::remove(tree.id);
+            // if parent exists, decrement parent kids count
+            if let Some(p) = tree.parent {
+                if let Some(tp) = <Trees<T>>::get(p) {
+                    <Trees<T>>::insert(
+                        p,
+                        TreeState {
+                            kids: tp.kids - 1,
+                            ..tp
+                        },
+                    );
+                }
             }
-        };
-        if let Some(mut mem) = mems {
-            mem.dedup();
-            mem.into_iter().for_each(|m| remove_if_exists(tree.id, &m));
-        } else {
-            // Remove Entire Tree, and all Children
+            // Recursively remove all Children
             // runtime recursion bounded by module-level constraints on
             // * delegation depth/height (MaxDepth)
             // * children (subtrees) per tree (MaxKids)
@@ -426,20 +443,6 @@ impl<T: Trait> Module<T> {
                     Self::remove_mems(child, None, penalty);
                 }
             });
-            <Members<T>>::iter_prefix(tree.id)
-                .for_each(|(a, _)| remove_if_exists(tree.id, &a));
-            <Trees<T>>::remove(tree.id);
-            // if parent exists, update parent kids count
-            if let Some(p) = tree.parent {
-                <Trees<T>>::mutate(p, |tri| {
-                    if let Some(t) = tri {
-                        t.kids -= 1u32
-                    }
-                });
-            }
         }
-        // insert actual size increase
-        tree.size -= size_decrease;
-        <Trees<T>>::insert(tree.id, tree);
     }
 }
