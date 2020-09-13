@@ -6,7 +6,7 @@
 //! * the number of subgroups
 //! * the depth of delegation
 //! These constraints allow us to use recursion in the module
-//! with strict bounds on computation and storage complexity.
+//! with strict bounds on worst-case complexity.
 //!
 //! - [`delegate::Trait`](./trait.Trait.html)
 //! - [`Call`](./enum.Call.html)
@@ -419,8 +419,6 @@ impl<T: Trait> Module<T> {
                 <Members<T>>::remove(tree.id, a);
                 size_decrease += 1u32;
             });
-            // removing tree creates bug in unique TreeId generation
-            // <Trees<T>>::remove(tree.id);
             // if parent exists, decrement parent kids count
             if let Some(p) = tree.parent {
                 if let Some(tp) = <Trees<T>>::get(p) {

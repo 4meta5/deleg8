@@ -1,6 +1,6 @@
 # Delegate
 
-This pallet demonstrates a way to bound runtime recursion with module-level constraints. Bond calculations disincentivize large (1), wide (2), and deep (3) tree delegation.
+This pallet demonstrates how to safely bound runtime recursion with module-level constraints. The associated types of the module's Trait bound and disincentivize (1) large, (2) wide, and (3) deep tree delegation.
 1. group size, number of members `Vec<AccountId>` associated on-chain with `TreeId` s.t. each tree can only have up to `Trait::MaxSize` members in total
 2. number of subtrees, each tree can only have up to `Trait::MaxKids` number of subtrees for delegation
 3. depth, a tree can only have height up to `Trait::MaxDepth` or it is not allowed to be created for delegation, `depth_of_child = depth_of_parent + 1`
